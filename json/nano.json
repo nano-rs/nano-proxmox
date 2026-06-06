@@ -1,0 +1,54 @@
+{
+  "name": "nano",
+  "slug": "nano",
+  "categories": [
+    6,
+    9
+  ],
+  "date_created": "2026-06-06",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "has_arm": false,
+  "interface_port": 80,
+  "documentation": "https://nano.rs",
+  "website": "https://nano.rs",
+  "logo": "https://raw.githubusercontent.com/nano-rs/nano-proxmox/main/misc/nano-logo.png",
+  "description": "nano is a lightweight, open-source SIEM (Security Information and Event Management) platform. It ingests logs over HTTP, Splunk HEC, OpenTelemetry, Fluent and the Vector protocol into ClickHouse, with a search/hunting UI (nano Pipe Language), scheduled and real-time detection rules, and prevalence-based false-positive reduction.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/nano.sh",
+      "config_path": "/opt/nano/.env",
+      "resources": {
+        "cpu": 4,
+        "ram": 8192,
+        "hdd": 40,
+        "os": "Debian",
+        "version": "12"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "On first visit you are redirected to /setup to create the admin account. It is open until claimed, so do this promptly.",
+      "type": "info"
+    },
+    {
+      "text": "The log-ingestion bearer token is saved inside the container at ~/nano.creds and in /opt/nano/.env (VECTOR_AUTH_TOKEN). Send logs to http://<ip>:8080 with 'Authorization: Bearer <token>'.",
+      "type": "info"
+    },
+    {
+      "text": "ClickHouse is memory-hungry: 8GB RAM is the floor, 12-16GB is recommended for real ingestion volume.",
+      "type": "warning"
+    },
+    {
+      "text": "Runs over plain HTTP with NANOSIEM_DEV_MODE enabled so auth cookies work without TLS. Front the container with HTTPS for any production exposure.",
+      "type": "warning"
+    }
+  ]
+}
