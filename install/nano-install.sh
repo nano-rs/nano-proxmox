@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 
-# Copyright (c) 2024-2026 nano-rs
-# Author: nano-rs (https://nano.rs)
-# License: Apache-2.0
-# Source: https://github.com/nano-rs/nano-proxmox
+# Copyright (c) 2021-2026 community-scripts ORG
+# Author: nano-rs
+# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
+# Source: https://github.com/nano-rs/nano
 
 # This runs INSIDE the freshly created LXC. The function library (color, msg_*,
 # update_os, $STD, motd_ssh, customize, ...) is injected by the ProxmoxVE
-# build.func via $FUNCTIONS_FILE_PATH — same contract every community-scripts
-# install/ file uses.
+# build.func via $FUNCTIONS_FILE_PATH — same contract every install/ file uses.
 source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
 color
 verb_ip6
@@ -17,10 +16,11 @@ setting_up_container
 network_check
 update_os
 
-# Where the nano-proxmox config bundle (compose + clickhouse/vector/nginx) is
-# pulled from. Override REPO_BRANCH=<branch> to test an unmerged branch.
-REPO_OWNER="${REPO_OWNER:-nano-rs}"
-REPO_BRANCH="${REPO_BRANCH:-main}"
+# nano open-core source. The compose + ClickHouse/Vector/nginx configs are
+# pulled straight from the upstream project repo (nano-rs/nano), exactly like
+# nano's own install.sh — no third-party bundle. Override NANO_BRANCH to test an
+# unmerged branch.
+NANO_BRANCH="${NANO_BRANCH:-main}"
 DEPLOY_DIR="/opt/nano"
 
 msg_info "Installing Dependencies"
@@ -29,6 +29,10 @@ $STD apt-get install -y \
   ca-certificates \
   gnupg \
   openssl
+# yq: used below to apply the two unprivileged-LXC compose adaptations. Install
+# into /usr/bin so it's on PATH in the install context.
+curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/bin/yq
+chmod +x /usr/bin/yq
 msg_ok "Installed Dependencies"
 
 msg_info "Installing Docker"
@@ -39,72 +43,73 @@ echo -e '{\n  "log-driver": "journald"\n}' >"$DOCKER_CONFIG_PATH"
 $STD sh <(curl -fsSL https://get.docker.com)
 msg_ok "Installed Docker"
 
-msg_info "Fetching nano configuration"
+msg_info "Fetching nano (open-core) from nano-rs/nano"
 mkdir -p "$DEPLOY_DIR"
-# Extract install/files/* from the repo tarball straight into the deploy dir:
-# docker-compose.yml, clickhouse/{config.d,users.d}, config/{vector,nginx}.
-curl -fsSL "https://github.com/${REPO_OWNER}/nano-proxmox/archive/refs/heads/${REPO_BRANCH}.tar.gz" |
-  tar -xz -C "$DEPLOY_DIR" --strip-components=3 "nano-proxmox-${REPO_BRANCH}/install/files"
-# Mountpoint for the nano-vector-dynamic volume. The vector container binds
-# config/vector at /etc/vector READ-ONLY, so Docker can't create the dynamic
-# subdir itself; the api delivers parser configs here (NAN-1218).
-mkdir -p "${DEPLOY_DIR}/config/vector/dynamic"
-msg_ok "Fetched nano configuration"
+# Pull only what the compose mounts: the opensource compose, the digest
+# lockfile, and the ClickHouse / Vector / nginx config trees.
+curl -fsSL "https://github.com/nano-rs/nano/archive/refs/heads/${NANO_BRANCH}.tar.gz" |
+  tar -xz -C "$DEPLOY_DIR" --strip-components=1 \
+    "nano-${NANO_BRANCH}/docker-compose.opensource.yml" \
+    "nano-${NANO_BRANCH}/images.lock" \
+    "nano-${NANO_BRANCH}/config/vector" \
+    "nano-${NANO_BRANCH}/config/nginx/nginx.opensource.conf" \
+    "nano-${NANO_BRANCH}/clickhouse/config.d" \
+    "nano-${NANO_BRANCH}/clickhouse/users.d"
+# Make it the default compose file so `docker compose ...` (here and in the
+# ct/ update flow) needs no -f.
+mv "${DEPLOY_DIR}/docker-compose.opensource.yml" "${DEPLOY_DIR}/docker-compose.yml"
+msg_ok "Fetched nano"
+
+msg_info "Adapting compose for unprivileged LXC"
+cd "$DEPLOY_DIR" || exit 1
+# 1) Dragonfly ships `ulimits: memlock: -1`. Setting RLIMIT_MEMLOCK to unlimited
+#    is not permitted in an unprivileged LXC (Docker can't exceed the container's
+#    memlock hard cap) -> "error setting rlimit type 8: operation not permitted",
+#    and the container never starts. Dragonfly runs fine without it at this
+#    maxmemory cap (the ulimit only mattered for io_uring on pre-5.12 kernels).
+yq -i 'del(.services.dragonfly.ulimits)' docker-compose.yml
+# 2) Dragonfly's default registry (docker.dragonflydb.io) intermittently times
+#    out; the GHCR mirror resolves reliably (NAN-1217).
+yq -i '.services.dragonfly.image = "ghcr.io/dragonflydb/dragonfly:latest"' docker-compose.yml
+# Fail loudly if either patch didn't take — a silently-unpatched compose would
+# crash-loop dragonfly (memlock) and take the stack down.
+if grep -q 'memlock' docker-compose.yml || grep -q 'docker.dragonflydb.io' docker-compose.yml; then
+  msg_error "Failed to adapt compose for unprivileged LXC (dragonfly patch did not apply)"
+  exit 1
+fi
+msg_ok "Adapted compose"
 
 msg_info "Generating secrets and environment"
-# Generated once here and persisted to ${DEPLOY_DIR}/.env on the container disk,
-# so a stack restart reuses the SAME keys. Rotating them would orphan
-# secret-at-rest data (NANOSIEM_ENCRYPTION_KEY) and log everyone out (JWT_SECRET).
-JWT_SECRET="$(openssl rand -hex 32)"
-ENCRYPTION_KEY="$(openssl rand -hex 32)"
-POSTGRES_PASSWORD="$(openssl rand -hex 16)"
-CLICKHOUSE_PASSWORD="$(openssl rand -hex 16)"
-CLICKHOUSE_ADMIN_PASSWORD="$(openssl rand -hex 16)"
-VECTOR_AUTH_TOKEN="$(openssl rand -hex 24)"
-# Container's primary IPv4 — drives CORS + auth-cookie scope (analysts hit nginx
-# on :80 at this address).
+# Generated once and persisted to ${DEPLOY_DIR}/.env on the container disk so a
+# stack restart reuses the SAME keys. Rotating them would orphan secret-at-rest
+# data (NANOSIEM_ENCRYPTION_KEY) and log everyone out (JWT_SECRET). Mirrors the
+# key set in upstream .env.opensource.example.
 LOCAL_IP="$(hostname -I | awk '{print $1}')"
-
 cat <<EOF >"${DEPLOY_DIR}/.env"
 # nano SIEM environment — generated by nano-proxmox install on first boot.
 # Consumed by docker-compose.yml (\${...} interpolation). Keep this file.
 
+# Image tag pulled from ghcr.io/nano-rs/* (digest-pinned in images.lock).
+NANO_VERSION=latest
+
 # Public URL analysts hit (nginx reverse proxy). Drives CORS + cookie scope.
 BASE_URL=http://${LOCAL_IP}
 
-# Plain-HTTP appliance → dev mode so the auth refresh cookie is set without the
+# Plain-HTTP appliance -> dev mode so the auth refresh cookie is set without the
 # Secure flag (browsers drop Secure cookies over http://). Front with HTTPS and
 # set this to false for production exposure.
 NANOSIEM_DEV_MODE=true
 
-# --- Images ---
-NANOSIEM_REGISTRY=ghcr.io/nano-rs
-NANOSIEM_VERSION=latest
-
-# --- Database ---
-POSTGRES_USER=nanosiem
-POSTGRES_DB=nanosiem
-POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
-CLICKHOUSE_ADMIN_PASSWORD=${CLICKHOUSE_ADMIN_PASSWORD}
-
-# --- Secrets ---
-JWT_SECRET=${JWT_SECRET}
-NANOSIEM_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+# --- Secrets (32-byte hex) ---
+POSTGRES_PASSWORD=$(openssl rand -hex 32)
+CLICKHOUSE_PASSWORD=$(openssl rand -hex 32)
+CLICKHOUSE_ADMIN_PASSWORD=$(openssl rand -hex 32)
+JWT_SECRET=$(openssl rand -hex 32)
+NANOSIEM_ENCRYPTION_KEY=$(openssl rand -hex 32)
 
 # --- Log ingestion ---
 # Clients ship logs with: Authorization: Bearer \${VECTOR_AUTH_TOKEN}
-VECTOR_AUTH_TOKEN=${VECTOR_AUTH_TOKEN}
-
-# --- Published ports (host side) ---
-HTTP_PORT=80
-VECTOR_HTTP_PORT=8080
-VECTOR_HEC_PORT=8088
-
-# --- Retention / tier ---
-HOT_RETENTION_DAYS=90
-WARM_RETENTION_DAYS=30
-NANO_TIER=unrestricted
+VECTOR_AUTH_TOKEN=$(openssl rand -hex 24)
 
 RUST_LOG=info
 EOF
@@ -112,7 +117,6 @@ chmod 600 "${DEPLOY_DIR}/.env"
 msg_ok "Generated secrets and environment"
 
 msg_info "Pulling nano images (first run downloads ~12 images — be patient)"
-cd "$DEPLOY_DIR" || exit 1
 # Serialize the pull: a fully-parallel pull fires dozens of simultaneous CDN
 # lookups and can overwhelm a small resolver; retry to ride out hiccups
 # (NAN-1224 / NAN-1230).
@@ -130,6 +134,26 @@ if [[ "$pull_ok" -ne 1 ]]; then
   exit 1
 fi
 msg_ok "Pulled images"
+
+# Supply-chain check: confirm the first-party images we just pulled match the
+# CI-vouched manifest digests in images.lock. Docker already checksum-verifies
+# layers, but that doesn't prove the tag wasn't re-pushed. Non-fatal: images.lock
+# tracks the latest release, so a freshly-pushed :latest can briefly differ.
+msg_info "Verifying nano image digests against images.lock"
+digest_mismatch=0
+while read -r repo expected; do
+  [[ -z "$repo" || "$repo" == \#* ]] && continue
+  actual="$(docker image inspect "${repo}:latest" \
+    --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null |
+    grep -F "${repo}@" | head -1)"
+  actual="${actual##*@}"
+  [[ "$actual" != "$expected" ]] && digest_mismatch=1
+done <images.lock
+if [[ "$digest_mismatch" -eq 0 ]]; then
+  msg_ok "Image digests verified"
+else
+  msg_warn "Image digest(s) differ from images.lock — continuing (lockfile tracks the latest release)"
+fi
 
 msg_info "Starting nano SIEM stack"
 $STD docker compose up -d --remove-orphans
@@ -151,6 +175,7 @@ else
 fi
 
 # Surface the ingest token (also in ${DEPLOY_DIR}/.env) for log-shipper setup.
+VECTOR_AUTH_TOKEN="$(awk -F= '/^VECTOR_AUTH_TOKEN=/{print $2}' "${DEPLOY_DIR}/.env")"
 {
   echo "nano SIEM ingest token (Authorization: Bearer <token>):"
   echo "  ${VECTOR_AUTH_TOKEN}"

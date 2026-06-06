@@ -13,7 +13,7 @@
   "interface_port": 80,
   "documentation": "https://nano.rs",
   "website": "https://nano.rs",
-  "logo": "https://raw.githubusercontent.com/nano-rs/nano-proxmox/main/misc/nano-logo.png",
+  "logo": "https://raw.githubusercontent.com/nano-rs/nano/main/logo_blue.svg",
   "description": "nano is a lightweight, open-source SIEM (Security Information and Event Management) platform. It ingests logs over HTTP, Splunk HEC, OpenTelemetry, Fluent and the Vector protocol into ClickHouse, with a search/hunting UI (nano Pipe Language), scheduled and real-time detection rules, and prevalence-based false-positive reduction.",
   "install_methods": [
     {
