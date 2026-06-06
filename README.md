@@ -44,6 +44,22 @@ CORES=8 RAM=16384 DISK=100 \
 | `TEMPLATE_STORAGE` | `local` | storage for the LXC template |
 | `NANO_BRANCH` | `main` | `nano-rs/nano` branch to deploy |
 
+## Tested on
+
+Validated end-to-end (install → all services healthy → log ingest lands in ClickHouse)
+on:
+
+| | |
+|---|---|
+| Proxmox VE | **9.2.3** (kernel `7.0.2-6-pve`) |
+| Architecture | amd64 |
+| Container | unprivileged Debian 12 LXC, nesting + keyctl |
+| Storage / bridge | `local-lvm` / `vmbr0` (defaults) |
+| Date | 2026-06-06 |
+
+Other configurations (PVE 8.x, arm64, non-default storage/bridge) are parameterized
+and expected to work but have not yet been exercised.
+
 ## Resources
 
 The full open-core stack is real software — these are the defaults:
