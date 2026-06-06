@@ -1,4 +1,4 @@
-# nano SIEM — Proxmox VE helper script
+# nano SIEM — Proxmox VE installer
 
 One command stands up a complete, self-contained [nano](https://nano.rs) SIEM in a
 Proxmox VE LXC container: ClickHouse + PostgreSQL + Dragonfly + the nano
@@ -7,58 +7,52 @@ a single nginx reverse proxy on port 80.
 
 This is the **SIEM-only** deployment — a running nano instance ready to receive
 logs. It does **not** provision endpoints, agents, Sysmon, or any Windows/AD lab
-plumbing. For a full lab (AD domain + Windows boxes + Sysmon + Vector agents +
-Conduit MITM) use [nano-ludus](https://github.com/nano-rs/nano-ludus) instead.
+plumbing. For a full lab (AD + Windows + Sysmon + Vector agents + Conduit MITM) use
+[nano-ludus](https://github.com/nano-rs/nano-ludus) instead.
 
-It follows the [community-scripts/ProxmoxVE](https://github.com/community-scripts/ProxmoxVE)
-convention and runs the public open-core images from `ghcr.io/nano-rs` — no registry
-auth, nothing to build.
-
-## What this repo is
-
-The three files here (`ct/nano.sh`, `install/nano-install.sh`, `json/nano.json`)
-are nano's submission to the community-scripts catalog. They are designed to be run
-by the community-scripts `build.func` (which fetches them from the
-community-scripts repo, not this one), so the **install path is the
-community-scripts one-liner below**, not a clone of this repo.
-
-The compose file and the ClickHouse / Vector / nginx configs are **not** vendored
-here — `nano-install.sh` pulls them straight from the upstream project repo
-([`nano-rs/nano`](https://github.com/nano-rs/nano)), the same source nano's own
-`install.sh` uses, so this deployment never drifts from upstream.
+It runs the public open-core images from `ghcr.io/nano-rs` — no registry auth,
+nothing to build.
 
 ## Install
 
-Run this in the **Proxmox VE host** shell (available once merged into
-community-scripts/ProxmoxVE):
+Run this in the **Proxmox VE host** shell:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/nano.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/nano-rs/nano-proxmox/main/scripts/install.sh)"
 ```
 
-It creates a Debian 12 LXC, installs Docker, pulls the open-core stack, and waits
-for the API to come up (first boot runs the ClickHouse migrations, so give it a few
-minutes).
+It creates an unprivileged Debian 12 LXC (Docker-capable: nesting + keyctl),
+installs Docker, pulls the open-core stack, and waits for the API to come up (first
+boot runs the ClickHouse migrations, so give it a few minutes).
 
-> **Before it's merged:** new community-scripts apps land in the development repo
-> [`ProxmoxVED`](https://github.com/community-scripts/ProxmoxVED) first. During
-> review, test via the ProxmoxVED dev one-liner for this script.
+Tunables — export before running:
+
+```bash
+CORES=8 RAM=16384 DISK=100 \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/nano-rs/nano-proxmox/main/scripts/install.sh)"
+```
+
+| Var | Default | |
+|---|---|---|
+| `CTID` | next free id | container id |
+| `NANO_HOSTNAME` | `nano-siem` | hostname |
+| `CORES` | `4` | vCPUs |
+| `RAM` | `8192` | memory (MB) |
+| `DISK` | `40` | rootfs (GB) |
+| `BRIDGE` | `vmbr0` | network bridge |
+| `STORAGE` | `local-lvm` | rootfs storage |
+| `TEMPLATE_STORAGE` | `local` | storage for the LXC template |
+| `NANO_BRANCH` | `main` | `nano-rs/nano` branch to deploy |
 
 ## Resources
 
-The full open-core stack is real software — these are the defaults the script uses:
+The full open-core stack is real software — these are the defaults:
 
 | Resource | Default | Notes |
 |---|---|---|
 | CPU | 4 cores | practical floor |
-| RAM | 8 GB | the stack fits in 8 GB (ClickHouse is capped at 2 GB in the compose); **12–16 GB recommended** for real volume — raise the container RAM and the ClickHouse memory limit together |
+| RAM | 8 GB | the stack fits in 8 GB (ClickHouse capped at 2 GB in the compose); **12–16 GB recommended** for real volume — raise `RAM` and the ClickHouse memory limit together |
 | Disk | 40 GB | log storage grows with ingestion + retention (90-day hot default) |
-
-Override before/at creation, e.g.:
-
-```bash
-var_cpu=8 var_ram=16384 var_disk=100 bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/ct/nano.sh)"
-```
 
 ## Access
 
@@ -76,8 +70,8 @@ open until claimed, so do it promptly.
 ## Sending logs
 
 The Vector pipeline accepts logs on several protocols (published on the container IP).
-Authenticate with the bearer token generated at install time — it's saved inside the
-container at `~/nano.creds` and in `/opt/nano/.env` (`VECTOR_AUTH_TOKEN`).
+Authenticate with the bearer token generated at install time — saved inside the
+container at `/root/nano.creds` and in `/opt/nano/.env` (`VECTOR_AUTH_TOKEN`).
 
 | Protocol | Endpoint |
 |---|---|
@@ -100,14 +94,25 @@ in-app **Parser Repository** — open-core ships with none deployed.
 
 ## Updating
 
-Re-run the script on the Proxmox host and pick **Update** — it pulls the latest
-`ghcr.io/nano-rs` images and recreates the stack (your data volumes and secrets in
-`/opt/nano/.env` are preserved).
+Inside the container (`pct enter <ctid>`):
 
-To pin a release instead of tracking `latest`, edit `NANO_VERSION` in
-`/opt/nano/.env` and run `docker compose up -d` from `/opt/nano`.
+```bash
+cd /opt/nano && docker compose pull && docker compose up -d --remove-orphans
+```
+
+Your data volumes and the secrets in `/opt/nano/.env` are preserved. To pin a release
+instead of tracking `latest`, edit `NANO_VERSION` in `/opt/nano/.env` first.
 
 ## What's under the hood
+
+The installer is two small scripts:
+
+- **`scripts/install.sh`** — runs on the Proxmox host: creates the LXC and kicks off
+  the deploy. No dependency on community-scripts `build.func`.
+- **`scripts/deploy.sh`** — runs inside the container: installs Docker, pulls the
+  compose + ClickHouse/Vector/nginx configs straight from
+  [`nano-rs/nano`](https://github.com/nano-rs/nano) (so this never drifts from
+  upstream), and brings the stack up.
 
 Everything lives in `/opt/nano` inside the container:
 
@@ -118,12 +123,12 @@ Everything lives in `/opt/nano` inside the container:
   images.lock                 # CI-vouched first-party image digests
   .env                        # generated secrets + config (chmod 600)
   clickhouse/{config.d,users.d}
-  config/vector/              # static Vector bundle (+ dynamic/ for api-delivered parsers)
+  config/vector/
   config/nginx/nginx.opensource.conf
 ```
 
-The install applies exactly two adaptations to the upstream compose, both required
-to run in an **unprivileged** LXC:
+The deploy applies exactly two adaptations to the upstream compose, both required to
+run in an **unprivileged** LXC:
 
 1. **Drops `dragonfly.ulimits.memlock`** — unlimited memlock can't be set in an
    unprivileged LXC (`error setting rlimit type 8: operation not permitted`), which
@@ -131,16 +136,17 @@ to run in an **unprivileged** LXC:
 2. **Swaps the Dragonfly image to the GHCR mirror** — `docker.dragonflydb.io`
    intermittently times out; GHCR resolves reliably (NAN-1217).
 
-The compose contract mirrors the validated open-core quickstart: a one-shot
-`clickhouse-migrate` seeds the schema before the services boot, `nano-jobs` runs the
-schedulers, and `nano-api` delivers per-source parser configs into the shared
-`nano-vector-dynamic` volume that Vector reads from `/etc/vector/dynamic`.
+## community-scripts catalog
+
+The `ct/`, `install/`, and `json/` files are a [community-scripts/ProxmoxVE](https://github.com/community-scripts/ProxmoxVE)
+submission, kept ready for the day nano meets that catalog's new-script eligibility
+bar (≥6 months old, 600+ stars, published release tarballs). Until then, use the
+standalone installer above.
 
 ## License
 
 This repo is [Apache-2.0](LICENSE). The `ct/` and `install/` scripts carry an MIT
-header per community-scripts convention (they're contributed to that catalog under
-its MIT license). The nano application they install is AGPL-3.0.
+header per community-scripts convention. The nano application it installs is AGPL-3.0.
 
 > Internal config keeps a `nanosiem` / `nanosiem_*` naming (it maps to the database,
 > users, and env vars the images expect) — that's intentional, not a typo.
