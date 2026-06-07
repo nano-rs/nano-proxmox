@@ -54,11 +54,17 @@ cd "$DEPLOY_DIR" || die "cannot cd to $DEPLOY_DIR"
 # 1) Drop dragonfly's `ulimits: memlock: -1`: unlimited memlock can't be set in
 #    an unprivileged LXC (-> "error setting rlimit type 8: operation not
 #    permitted", container never starts). Dragonfly runs fine without it.
+#    (Upstream may have already removed it — del is a no-op then.)
 yq -i 'del(.services.dragonfly.ulimits)' docker-compose.yml || die "yq memlock patch failed"
 # 2) docker.dragonflydb.io intermittently times out; use the GHCR mirror.
 yq -i '.services.dragonfly.image = "ghcr.io/dragonflydb/dragonfly:latest"' docker-compose.yml || die "yq image patch failed"
-grep -q 'memlock' docker-compose.yml && die "compose adaptation failed (memlock still present)"
-grep -q 'docker.dragonflydb.io' docker-compose.yml && die "compose adaptation failed (old dragonfly image)"
+# Verify the adaptations against the actual YAML keys, not raw text — the
+# upstream compose carries a comment that contains the word "memlock" (NAN-1255
+# explains why the ulimit was removed), which a `grep memlock` false-positives on.
+[ "$(yq '.services.dragonfly.ulimits' docker-compose.yml)" = "null" ] \
+  || die "compose adaptation failed (dragonfly.ulimits still set)"
+[ "$(yq '.services.dragonfly.image' docker-compose.yml)" = "ghcr.io/dragonflydb/dragonfly:latest" ] \
+  || die "compose adaptation failed (dragonfly image not swapped)"
 ok "Compose adapted"
 
 msg "Generating secrets and environment"
@@ -98,6 +104,11 @@ ok "Images pulled"
 mismatch=0
 while read -r repo expected; do
   [[ -z "$repo" || "$repo" == \#* ]] && continue
+  # Only the first-party ghcr.io/nano-rs/* lines track :latest. NAN-1258 added a
+  # second section of self-contained third-party pins (e.g. `postgres:17 sha256:…`)
+  # that already carry their tag — docker enforces those at pull via the compose
+  # @sha256 refs, so skip them here (and `${repo}:latest` would be malformed).
+  [[ "$repo" == ghcr.io/nano-rs/* ]] || continue
   actual="$(docker image inspect "${repo}:latest" \
     --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null |
     grep -F "${repo}@" | head -1)"
